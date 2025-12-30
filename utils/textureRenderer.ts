@@ -33,10 +33,12 @@ export async function createTextureCanvas(
       console.log('Pattern SVG loaded successfully:', pattern.name);
     } catch (error) {
       console.warn('Failed to load pattern SVG:', pattern.svgUrl, error);
-      // Continue without pattern - will show material only
+      // Fallback to a simple square pattern if SVG fails to load
+      patternImg = await createFallbackPatternSVG();
     }
   } else {
-    console.log('No pattern SVG URL for:', pattern.name);
+    // If no SVG URL, use a fallback (e.g., a simple square)
+    patternImg = await createFallbackPatternSVG();
   }
 
   // Calculate pattern tile dimensions based on pattern settings
@@ -81,20 +83,20 @@ export async function createTextureCanvas(
     const maskCtx = maskCanvas.getContext('2d');
     
     if (maskCtx) {
-      // Fill with white (fully visible) first
-      maskCtx.fillStyle = '#ffffff';
-      maskCtx.fillRect(0, 0, outputWidth, outputHeight);
+      // Start with transparent canvas (all hidden by default)
+      // Material will only show where pattern shapes are (where we set alpha = 255)
+      maskCtx.clearRect(0, 0, outputWidth, outputHeight);
       
       // Tile the pattern SVG across the canvas
-      // The pattern SVG defines one "unit" of the pattern
+      // The pattern SVG defines one "unit" of the pattern with filled black shapes
       // We repeat it based on rows/columns - this creates the "zoom out" effect
       for (let row = 0; row < rows; row++) {
         for (let col = 0; col < columns; col++) {
           const x = col * patternUnitWidth;
           const y = row * patternUnitHeight;
           
-          // Draw the pattern SVG - it defines where tiles should be
-          // The SVG has paths that show tile boundaries/shapes
+          // Draw the pattern SVG - it has black filled shapes defining where tiles should be
+          // The SVG modification in loadPatternSVG ensures paths are filled with black
           maskCtx.drawImage(
             patternImg,
             x,
@@ -105,29 +107,49 @@ export async function createTextureCanvas(
         }
       }
       
-      // The pattern SVG from cdn.architextures.org has black paths on transparent/white background
-      // We need to use it as a mask where black = visible, transparent = hidden
-      // Convert the pattern to use alpha channel properly
+      // Process the mask: pattern SVG has black filled shapes on transparent/white background
+      // Material should show INSIDE the pattern shapes (where black pixels are)
+      // Material should NOT show outside (where white/transparent pixels are)
       const maskImageData = maskCtx.getImageData(0, 0, outputWidth, outputHeight);
       const maskData = maskImageData.data;
       
-      // Process the mask: pattern SVGs typically have black strokes/paths
-      // We want material to show where the pattern has visible content
+      let darkPixelCount = 0;
+      let lightPixelCount = 0;
+      
+      // Convert pattern to mask: black shapes (pattern) = visible, white/transparent = hidden
       for (let i = 0; i < maskData.length; i += 4) {
         const r = maskData[i];
         const g = maskData[i + 1];
         const b = maskData[i + 2];
         const a = maskData[i + 3];
         
-        // If pixel is dark (part of pattern path), make it fully opaque
-        // If pixel is light/transparent (background), make it transparent
+        // Calculate brightness to determine if pixel is part of pattern shape
         const brightness = (r + g + b) / 3;
-        if (brightness < 128 || a < 128) {
-          // Dark pixel or transparent = part of pattern = visible
+        
+        // Pattern shapes are black (brightness ~0), background is white/transparent (brightness ~255)
+        // For destination-in: material shows where mask alpha = 255
+        // Black pixels (pattern shapes) → alpha = 255 (material visible)
+        // White/light pixels (background) → alpha = 0 (material hidden)
+        if (brightness < 128 && a > 50) {
+          // Dark pixel (part of pattern shape) = make visible
           maskData[i + 3] = 255;
+          darkPixelCount++;
         } else {
-          // Light pixel = background = hidden
+          // Light/white/transparent pixel (background) = make hidden
           maskData[i + 3] = 0;
+          lightPixelCount++;
+        }
+      }
+      
+      console.log(`Pattern mask processed: ${darkPixelCount} dark pixels (visible), ${lightPixelCount} light pixels (hidden)`);
+      
+      // Safety check: ensure at least some pixels are visible
+      // If mask is completely transparent, show full material as fallback
+      if (darkPixelCount === 0) {
+        console.warn('Pattern mask has no dark pixels - pattern shapes not detected. Showing full material as fallback.');
+        // Make entire mask visible as fallback
+        for (let i = 3; i < maskData.length; i += 4) {
+          maskData[i] = 255;
         }
       }
       
@@ -136,32 +158,47 @@ export async function createTextureCanvas(
       // Use destination-in: keeps material only where pattern mask has opaque pixels
       ctx.globalCompositeOperation = 'destination-in';
       ctx.drawImage(maskCanvas, 0, 0);
+      
+      // Reset composite operation to default
+      ctx.globalCompositeOperation = 'source-over';
     }
     
     ctx.restore();
+  } else {
+    // If pattern image failed to load, log a warning but continue
+    console.warn('Pattern image not available, showing material without pattern mask');
   }
 
-  // Draw joints if enabled
-  if (jointSettings.horizontal > 0 || jointSettings.vertical > 0) {
+  // Draw joints only if explicitly enabled and values are set
+  // Joints should be subtle and only show when user wants them
+  // Default to true if enabled is undefined (backward compatibility)
+  const jointsEnabled = jointSettings.enabled !== undefined ? jointSettings.enabled : true;
+  if (jointsEnabled && (jointSettings.horizontal > 0 || jointSettings.vertical > 0)) {
     ctx.save();
     ctx.fillStyle = jointSettings.tint;
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = 0.6; // Make joints more subtle
 
     // Draw horizontal joints
     if (jointSettings.horizontal > 0) {
       const jointHeight = (jointSettings.horizontal / patternSettings.height) * patternUnitHeight;
-      for (let row = 1; row < rows; row++) {
-        const y = row * patternUnitHeight;
-        ctx.fillRect(0, y - jointHeight / 2, outputWidth, jointHeight);
+      // Only draw if joint height is meaningful (at least 1 pixel)
+      if (jointHeight >= 1) {
+        for (let row = 1; row < rows; row++) {
+          const y = row * patternUnitHeight;
+          ctx.fillRect(0, y - jointHeight / 2, outputWidth, jointHeight);
+        }
       }
     }
 
     // Draw vertical joints
     if (jointSettings.vertical > 0) {
       const jointWidth = (jointSettings.vertical / patternSettings.width) * patternUnitWidth;
-      for (let col = 1; col < columns; col++) {
-        const x = col * patternUnitWidth;
-        ctx.fillRect(x - jointWidth / 2, 0, jointWidth, outputHeight);
+      // Only draw if joint width is meaningful (at least 1 pixel)
+      if (jointWidth >= 1) {
+        for (let col = 1; col < columns; col++) {
+          const x = col * patternUnitWidth;
+          ctx.fillRect(x - jointWidth / 2, 0, jointWidth, outputHeight);
+        }
       }
     }
 
@@ -213,51 +250,100 @@ async function loadImage(url: string): Promise<HTMLImageElement> {
 }
 
 async function loadPatternSVG(url: string): Promise<HTMLImageElement> {
-  // Since CORS blocks direct fetch, we'll use a proxy approach
-  // For now, try direct image load which might work in some browsers
+  try {
+    // Fetch SVG as text so we can modify it
+    const response = await fetch(url, { mode: 'cors' });
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    let svgText = await response.text();
+    
+    // Modify SVG to fill the paths instead of just stroking them
+    // Architextures SVGs have fill:none and stroke:#000, we need to fill the shapes
+    // The pattern SVG defines tile shapes - we want these shapes filled with black
+    
+    // Replace fill:none with fill:#000000 (black fill)
+    svgText = svgText.replace(/fill:\s*none/gi, 'fill:#000000');
+    svgText = svgText.replace(/fill="none"/gi, 'fill="#000000"');
+    svgText = svgText.replace(/fill='none'/gi, "fill='#000000'");
+    
+    // Convert strokes to fills by removing stroke and ensuring fill is set
+    // If element has stroke but no fill, add fill with the stroke color
+    svgText = svgText.replace(/stroke="([^"]*)"/gi, (match, strokeColor) => {
+      // Keep stroke for now, but we'll ensure fill is set
+      return match;
+    });
+    
+    // Ensure all path elements have fill (prefer existing fill, otherwise add black fill)
+    svgText = svgText.replace(/<path([^>]*?)>/gi, (match, attrs) => {
+      // If path doesn't have fill attribute, add it
+      if (!attrs.includes('fill=') && !attrs.includes('fill:')) {
+        return `<path${attrs} fill="#000000">`;
+      }
+      // If path has fill="none", replace it
+      if (attrs.includes('fill="none"') || attrs.includes("fill='none'")) {
+        return `<path${attrs.replace(/fill=["']none["']/gi, 'fill="#000000"')}>`;
+      }
+      return match;
+    });
+    
+    // Also handle other shape elements (rect, circle, etc.)
+    svgText = svgText.replace(/<(rect|circle|ellipse|polygon|polyline)([^>]*?)>/gi, (match, tag, attrs) => {
+      if (!attrs.includes('fill=') && !attrs.includes('fill:')) {
+        return `<${tag}${attrs} fill="#000000">`;
+      }
+      if (attrs.includes('fill="none"') || attrs.includes("fill='none'")) {
+        return `<${tag}${attrs.replace(/fill=["']none["']/gi, 'fill="#000000"')}>`;
+      }
+      return match;
+    });
+    
+    // Create blob URL from modified SVG
+    const svgBlob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+    const blobUrl = URL.createObjectURL(svgBlob);
+    
+    // Load as image
+    const img = await loadImage(blobUrl);
+    
+    // Clean up blob URL
+    URL.revokeObjectURL(blobUrl);
+    
+    return img;
+  } catch (error) {
+    console.warn('Failed to fetch and modify SVG, trying direct load:', error);
+    // Fallback to direct image load
+    try {
+      return await loadImage(url);
+    } catch (directError) {
+      console.warn('Direct load also failed, using fallback pattern:', directError);
+      // If both fail, use a simple fallback pattern
+      return await createFallbackPatternSVG();
+    }
+  }
+}
+
+// Function to create a fallback square pattern SVG
+async function createFallbackPatternSVG(): Promise<HTMLImageElement> {
+  const svgText = `<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="100" height="100" fill="white"/>
+  </svg>`;
+  const svgBlob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+  const svgObjectUrl = URL.createObjectURL(svgBlob);
   const img = new Image();
-  img.crossOrigin = 'anonymous';
-  
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error('Pattern SVG load timeout'));
-    }, 10000);
-    
+  await new Promise<void>((resolve) => {
     img.onload = () => {
-      clearTimeout(timeout);
-      if (img.complete && img.naturalWidth > 0) {
-        resolve(img);
-      } else {
-        reject(new Error('Pattern SVG loaded but appears broken'));
-      }
+      URL.revokeObjectURL(svgObjectUrl);
+      resolve();
     };
-    
     img.onerror = () => {
-      clearTimeout(timeout);
-      // If direct load fails due to CORS, create a placeholder pattern
-      console.warn('Pattern SVG failed to load, creating fallback');
-      const fallbackCanvas = document.createElement('canvas');
-      fallbackCanvas.width = 100;
-      fallbackCanvas.height = 100;
-      const fallbackCtx = fallbackCanvas.getContext('2d');
-      if (fallbackCtx) {
-        // Create a simple grid pattern as fallback
-        fallbackCtx.fillStyle = '#000000';
-        fallbackCtx.fillRect(0, 0, 100, 100);
-        fallbackCtx.fillStyle = '#ffffff';
-        fallbackCtx.fillRect(0, 0, 50, 50);
-        fallbackCtx.fillRect(50, 50, 50, 50);
-        
-        img.src = fallbackCanvas.toDataURL();
-        img.onload = () => resolve(img);
-        img.onerror = () => reject(new Error('Failed to create fallback pattern'));
-      } else {
-        reject(new Error('Failed to create fallback canvas'));
-      }
+      URL.revokeObjectURL(svgObjectUrl);
+      console.error('Failed to create fallback SVG image.');
+      resolve();
     };
-    
-    img.src = url;
+    img.src = svgObjectUrl;
   });
+  return img;
 }
 
 async function applyAdjustments(
