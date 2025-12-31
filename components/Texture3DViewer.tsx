@@ -14,7 +14,7 @@ export default function Texture3DViewer({ config, className }: Texture3DViewerPr
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const cameraRef = useRef<THREE.OrthographicCamera | null>(null);
   const meshRef = useRef<THREE.Mesh | null>(null);
 
   useEffect(() => {
@@ -29,9 +29,12 @@ export default function Texture3DViewer({ config, className }: Texture3DViewerPr
     scene.background = new THREE.Color(0xf0f0f0);
     sceneRef.current = scene;
 
-    // Camera
-    const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
-    camera.position.set(0, 0, 5);
+    // Camera - use orthographic camera to fill viewport exactly
+    const aspect = width / height;
+    const camera = new THREE.OrthographicCamera(
+      -aspect, aspect, 1, -1, 0.1, 1000
+    );
+    camera.position.set(0, 0, 1);
     camera.lookAt(0, 0, 0);
     cameraRef.current = camera;
 
@@ -42,52 +45,32 @@ export default function Texture3DViewer({ config, className }: Texture3DViewerPr
     container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
-    // Lighting
+    // Lighting - add directional light to show depth
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
 
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(5, 5, 5);
-    scene.add(directionalLight);
+    const directionalLight1 = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight1.position.set(2, 2, 2);
+    scene.add(directionalLight1);
 
-    // Create plane geometry for texture display
-    const geometry = new THREE.PlaneGeometry(4, 4);
+    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+    directionalLight2.position.set(-2, -1, 1);
+    scene.add(directionalLight2);
+
+    // Create plane geometry with more subdivisions for smooth displacement
+    // Use aspect ratio to ensure it fills the viewport
+    const planeWidth = aspect * 2;
+    const planeHeight = 2;
+    const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, 128, 128); // High subdivision for displacement
     const material = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       side: THREE.DoubleSide,
+      displacementScale: 0.1, // Depth of displacement
+      displacementBias: 0,
     });
     const mesh = new THREE.Mesh(geometry, material);
     scene.add(mesh);
     meshRef.current = mesh;
-
-    // Mouse controls for rotation
-    let isDragging = false;
-    let previousMousePosition = { x: 0, y: 0 };
-
-    const onMouseDown = (e: MouseEvent) => {
-      isDragging = true;
-      previousMousePosition = { x: e.clientX, y: e.clientY };
-    };
-
-    const onMouseMove = (e: MouseEvent) => {
-      if (!isDragging) return;
-
-      const deltaX = e.clientX - previousMousePosition.x;
-      const deltaY = e.clientY - previousMousePosition.y;
-
-      mesh.rotation.y += deltaX * 0.01;
-      mesh.rotation.x += deltaY * 0.01;
-
-      previousMousePosition = { x: e.clientX, y: e.clientY };
-    };
-
-    const onMouseUp = () => {
-      isDragging = false;
-    };
-
-    container.addEventListener('mousedown', onMouseDown);
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
 
     // Animation loop
     const animate = () => {
@@ -98,22 +81,32 @@ export default function Texture3DViewer({ config, className }: Texture3DViewerPr
 
     // Handle resize
     const handleResize = () => {
-      if (!containerRef.current) return;
+      if (!containerRef.current || !cameraRef.current || !meshRef.current || !rendererRef.current) return;
       const newWidth = containerRef.current.clientWidth;
       const newHeight = containerRef.current.clientHeight;
+      const newAspect = newWidth / newHeight;
 
-      camera.aspect = newWidth / newHeight;
+      // Update orthographic camera
+      const camera = cameraRef.current as THREE.OrthographicCamera;
+      camera.left = -newAspect;
+      camera.right = newAspect;
+      camera.top = 1;
+      camera.bottom = -1;
       camera.updateProjectionMatrix();
-      renderer.setSize(newWidth, newHeight);
+
+      // Update plane geometry to match new aspect ratio
+      const geometry = meshRef.current.geometry as THREE.PlaneGeometry;
+      geometry.dispose();
+      const newGeometry = new THREE.PlaneGeometry(newAspect * 2, 2, 128, 128); // High subdivision for displacement
+      meshRef.current.geometry = newGeometry;
+
+      rendererRef.current.setSize(newWidth, newHeight);
     };
     window.addEventListener('resize', handleResize);
 
     // Cleanup
     return () => {
       window.removeEventListener('resize', handleResize);
-      container.removeEventListener('mousedown', onMouseDown);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
       renderer.dispose();
       geometry.dispose();
       material.dispose();
@@ -123,39 +116,36 @@ export default function Texture3DViewer({ config, className }: Texture3DViewerPr
 
   // Update texture when config changes
   useEffect(() => {
-    if (!meshRef.current || !config.pattern || !config.material) {
-      // Clear texture if pattern or material is missing
-      const currentMaterial = meshRef.current?.material as THREE.MeshStandardMaterial;
-      if (currentMaterial?.map) {
-        currentMaterial.map.dispose();
-        currentMaterial.map = null;
-        currentMaterial.needsUpdate = true;
-      }
+    if (!meshRef.current || !config.pattern) {
       return;
     }
 
-    console.log('Updating texture with pattern:', config.pattern.name, 'material:', config.material.name);
-
-    // Dispose of old texture to prevent memory leaks
+    // Dispose of old textures to prevent memory leaks
     const currentMaterial = meshRef.current.material as THREE.MeshStandardMaterial;
-    if (currentMaterial.map) {
-      currentMaterial.map.dispose();
-      currentMaterial.map = null;
-    }
+    if (currentMaterial.map) currentMaterial.map.dispose();
+    if (currentMaterial.displacementMap) currentMaterial.displacementMap.dispose();
+    if (currentMaterial.normalMap) currentMaterial.normalMap.dispose();
+    if (currentMaterial.roughnessMap) currentMaterial.roughnessMap.dispose();
 
     let cancelled = false;
 
     createTextureFromConfig(config, 2048, 2048)
-      .then((texture) => {
+      .then((textures) => {
         if (cancelled || !meshRef.current) {
-          texture.dispose();
+          textures.map.dispose();
+          textures.displacementMap.dispose();
+          textures.normalMap.dispose();
+          textures.roughnessMap.dispose();
           return;
         }
         
         const material = meshRef.current.material as THREE.MeshStandardMaterial;
-        material.map = texture;
+        material.map = textures.map;
+        material.displacementMap = textures.displacementMap;
+        material.normalMap = textures.normalMap;
+        material.roughnessMap = textures.roughnessMap;
+        material.displacementScale = 0.1; // Adjust depth
         material.needsUpdate = true;
-        console.log('Texture updated successfully');
       })
       .catch((error) => {
         console.error('Failed to create texture:', error);
@@ -183,16 +173,17 @@ export default function Texture3DViewer({ config, className }: Texture3DViewerPr
     config.adjustments.contrast,
     config.adjustments.hue,
     config.adjustments.saturation,
-    config.adjustments.invert
+    config.adjustments.invert,
   ]);
 
   return (
     <div 
       ref={containerRef} 
-      className={`relative bg-gray-100 rounded-lg overflow-hidden ${className}`}
+      className={`relative w-full h-full ${className}`}
+      style={{ minHeight: 0 }}
     >
       {(!config.pattern || !config.material) && (
-        <div className="absolute inset-0 flex items-center justify-center text-gray-400 z-10">
+        <div className="absolute inset-0 flex items-center justify-center text-gray-400 z-10 bg-gray-50">
           <p>Select a pattern and material to preview</p>
         </div>
       )}

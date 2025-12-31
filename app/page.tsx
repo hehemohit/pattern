@@ -12,7 +12,7 @@ import ControlPanel from '@/components/ControlPanel';
 
 const defaultConfig: TextureConfig = {
   pattern: patterns.find(p => p.id === 'herringbone') || null,
-  material: materials.find(m => m.id === 'granite-1') || null,
+  material: null, // Start without material to see patterns clearly
   patternSettings: {
     rows: 6,
     columns: 4,
@@ -47,6 +47,20 @@ export default function Home() {
   const [config, setConfig] = useState<TextureConfig>(defaultConfig);
   const [showPatternSelector, setShowPatternSelector] = useState(false);
   const [showMaterialSelector, setShowMaterialSelector] = useState(false);
+  const [customMaterials, setCustomMaterials] = useState<Material[]>(() => {
+    // Load custom materials from localStorage on mount
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('customMaterials');
+      if (stored) {
+        try {
+          return JSON.parse(stored);
+        } catch (e) {
+          return [];
+        }
+      }
+    }
+    return [];
+  });
 
   const handlePatternSelect = (pattern: Pattern) => {
     console.log('Pattern selected:', pattern.name, pattern.id);
@@ -68,9 +82,23 @@ export default function Home() {
     });
   };
 
+  const handleAddCustomMaterial = (material: Material) => {
+    const updated = [...customMaterials, material];
+    setCustomMaterials(updated);
+    // Save to localStorage
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('customMaterials', JSON.stringify(updated));
+    }
+    // Auto-select the new material
+    handleMaterialSelect(material);
+  };
+
+  // Combine default materials with custom materials
+  const allMaterials = [...materials, ...customMaterials];
+
   const handleDownload = async () => {
-    if (!config.pattern || !config.material) {
-      alert('Please select a pattern and material first');
+    if (!config.pattern) {
+      alert('Please select a pattern first');
       return;
     }
 
@@ -150,9 +178,13 @@ export default function Home() {
 
           {/* Right Column - Preview */}
           <div className="lg:col-span-2">
-            <div className="bg-white p-4 rounded-lg border">
-              <h3 className="font-semibold mb-4">Preview</h3>
-              <Texture3DViewer config={config} className="w-full h-[600px]" />
+            <div className="bg-white rounded-lg border overflow-hidden flex flex-col" style={{ height: '600px' }}>
+              <div className="px-4 py-3 border-b">
+                <h3 className="font-semibold">Preview</h3>
+              </div>
+              <div className="flex-1 min-h-0">
+                <Texture3DViewer config={config} className="w-full h-full" />
+              </div>
             </div>
           </div>
         </div>
@@ -170,10 +202,11 @@ export default function Home() {
 
       {showMaterialSelector && (
         <MaterialSelector
-          materials={materials}
+          materials={allMaterials}
           selectedMaterial={config.material}
           onSelect={handleMaterialSelect}
           onClose={() => setShowMaterialSelector(false)}
+          onAddCustom={handleAddCustomMaterial}
         />
       )}
     </div>

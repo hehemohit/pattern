@@ -1,6 +1,12 @@
 import { TextureConfig } from '@/types/texture';
 import * as THREE from 'three';
 
+/**
+ * Creates a texture canvas based on Architextures' approach:
+ * 1. Pattern SVG defines tile shapes (where material should appear)
+ * 2. Material fills within those pattern-defined tiles
+ * 3. Pattern "zooms out" based on rows/columns (more rows/columns = smaller pattern units)
+ */
 export async function createTextureCanvas(
   config: TextureConfig,
   outputWidth: number = 2048,
@@ -8,8 +14,8 @@ export async function createTextureCanvas(
 ): Promise<HTMLCanvasElement> {
   const { pattern, material, patternSettings, materialSettings, jointSettings, adjustments } = config;
 
-  if (!pattern || !material) {
-    throw new Error('Pattern and material are required');
+  if (!pattern) {
+    throw new Error('Pattern is required');
   }
 
   // Create a canvas for the final texture
@@ -19,85 +25,39 @@ export async function createTextureCanvas(
   const ctx = textureCanvas.getContext('2d');
   if (!ctx) throw new Error('Failed to get canvas context');
 
-  // Load material image
-  const materialImg = await loadImage(material.imageUrl);
-  
-  // Apply adjustments to material
-  const adjustedMaterial = await applyAdjustments(materialImg, adjustments);
-
-  // Load pattern SVG if exists
+  // Load pattern SVG - this defines the tile shapes
   let patternImg: HTMLImageElement | null = null;
   if (pattern.svgUrl) {
     try {
       patternImg = await loadPatternSVG(pattern.svgUrl);
-      console.log('Pattern SVG loaded successfully:', pattern.name);
     } catch (error) {
       console.warn('Failed to load pattern SVG:', pattern.svgUrl, error);
-      // Fallback to a simple square pattern if SVG fails to load
-      patternImg = await createFallbackPatternSVG();
     }
-  } else {
-    // If no SVG URL, use a fallback (e.g., a simple square)
-    patternImg = await createFallbackPatternSVG();
   }
 
-  // Calculate pattern tile dimensions based on pattern settings
+  // Calculate pattern tile dimensions
   const rows = patternSettings.rows;
   const columns = patternSettings.columns;
-  
-  // The pattern defines a unit tile that gets repeated
-  // Calculate the size of one pattern unit based on the output dimensions
   const patternUnitWidth = outputWidth / columns;
   const patternUnitHeight = outputHeight / rows;
 
-  // First, draw the material as a seamless background (tiled)
-  // Material should tile based on its own dimensions
-  const materialTileWidth = (materialSettings.width / patternSettings.width) * patternUnitWidth;
-  const materialTileHeight = (materialSettings.height / patternSettings.height) * patternUnitHeight;
-
-  // Fill entire canvas with tiled material
-  for (let y = 0; y < outputHeight; y += materialTileHeight) {
-    for (let x = 0; x < outputWidth; x += materialTileWidth) {
-      ctx.drawImage(adjustedMaterial, x, y, materialTileWidth, materialTileHeight);
-    }
-  }
-
-  // Apply tint if needed
-  if (materialSettings.tint !== '#FFFFFF') {
-    ctx.globalCompositeOperation = 'multiply';
-    ctx.fillStyle = materialSettings.tint;
+  // If no material, show pattern directly with clear colors
+  if (!material) {
+    // Clear canvas with light background
+    ctx.fillStyle = '#f5f5f5';
     ctx.fillRect(0, 0, outputWidth, outputHeight);
-    ctx.globalCompositeOperation = 'source-over';
-  }
 
-  // Apply pattern mask - the pattern SVG defines tile shapes
-  // The pattern "zooms out" based on rows/columns - this is the key to how Architextures works
-  // More rows/columns = smaller pattern units = pattern appears to zoom out and repeat more
-  if (patternImg && patternImg.complete && patternImg.naturalWidth > 0) {
-    ctx.save();
-    
-    // Create pattern mask canvas
-    const maskCanvas = document.createElement('canvas');
-    maskCanvas.width = outputWidth;
-    maskCanvas.height = outputHeight;
-    const maskCtx = maskCanvas.getContext('2d');
-    
-    if (maskCtx) {
-      // Start with transparent canvas (all hidden by default)
-      // Material will only show where pattern shapes are (where we set alpha = 255)
-      maskCtx.clearRect(0, 0, outputWidth, outputHeight);
+    // Draw pattern shapes directly in dark color
+    if (patternImg && patternImg.complete && patternImg.naturalWidth > 0) {
+      ctx.fillStyle = '#333333'; // Dark gray for pattern
       
       // Tile the pattern SVG across the canvas
-      // The pattern SVG defines one "unit" of the pattern with filled black shapes
-      // We repeat it based on rows/columns - this creates the "zoom out" effect
       for (let row = 0; row < rows; row++) {
         for (let col = 0; col < columns; col++) {
           const x = col * patternUnitWidth;
           const y = row * patternUnitHeight;
           
-          // Draw the pattern SVG - it has black filled shapes defining where tiles should be
-          // The SVG modification in loadPatternSVG ensures paths are filled with black
-          maskCtx.drawImage(
+          ctx.drawImage(
             patternImg,
             x,
             y,
@@ -106,99 +66,129 @@ export async function createTextureCanvas(
           );
         }
       }
-      
-      // Process the mask: pattern SVG has black filled shapes on transparent/white background
-      // Material should show INSIDE the pattern shapes (where black pixels are)
-      // Material should NOT show outside (where white/transparent pixels are)
-      const maskImageData = maskCtx.getImageData(0, 0, outputWidth, outputHeight);
-      const maskData = maskImageData.data;
-      
-      let darkPixelCount = 0;
-      let lightPixelCount = 0;
-      
-      // Convert pattern to mask: black shapes (pattern) = visible, white/transparent = hidden
-      for (let i = 0; i < maskData.length; i += 4) {
-        const r = maskData[i];
-        const g = maskData[i + 1];
-        const b = maskData[i + 2];
-        const a = maskData[i + 3];
-        
-        // Calculate brightness to determine if pixel is part of pattern shape
-        const brightness = (r + g + b) / 3;
-        
-        // Pattern shapes are black (brightness ~0), background is white/transparent (brightness ~255)
-        // For destination-in: material shows where mask alpha = 255
-        // Black pixels (pattern shapes) → alpha = 255 (material visible)
-        // White/light pixels (background) → alpha = 0 (material hidden)
-        if (brightness < 128 && a > 50) {
-          // Dark pixel (part of pattern shape) = make visible
-          maskData[i + 3] = 255;
-          darkPixelCount++;
-        } else {
-          // Light/white/transparent pixel (background) = make hidden
-          maskData[i + 3] = 0;
-          lightPixelCount++;
-        }
+    } else {
+      // If pattern failed to load, show a grid
+      ctx.strokeStyle = '#cccccc';
+      ctx.lineWidth = 2;
+      for (let row = 1; row < rows; row++) {
+        const y = row * patternUnitHeight;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(outputWidth, y);
+        ctx.stroke();
       }
-      
-      console.log(`Pattern mask processed: ${darkPixelCount} dark pixels (visible), ${lightPixelCount} light pixels (hidden)`);
-      
-      // Safety check: ensure at least some pixels are visible
-      // If mask is completely transparent, show full material as fallback
-      if (darkPixelCount === 0) {
-        console.warn('Pattern mask has no dark pixels - pattern shapes not detected. Showing full material as fallback.');
-        // Make entire mask visible as fallback
-        for (let i = 3; i < maskData.length; i += 4) {
-          maskData[i] = 255;
-        }
+      for (let col = 1; col < columns; col++) {
+        const x = col * patternUnitWidth;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, outputHeight);
+        ctx.stroke();
       }
-      
-      maskCtx.putImageData(maskImageData, 0, 0);
-      
-      // Use destination-in: keeps material only where pattern mask has opaque pixels
-      ctx.globalCompositeOperation = 'destination-in';
-      ctx.drawImage(maskCanvas, 0, 0);
-      
-      // Reset composite operation to default
-      ctx.globalCompositeOperation = 'source-over';
     }
-    
-    ctx.restore();
-  } else {
-    // If pattern image failed to load, log a warning but continue
-    console.warn('Pattern image not available, showing material without pattern mask');
-  }
 
-  // Draw joints only if explicitly enabled and values are set
-  // Joints should be subtle and only show when user wants them
-  // Default to true if enabled is undefined (backward compatibility)
-  const jointsEnabled = jointSettings.enabled !== undefined ? jointSettings.enabled : true;
-  if (jointsEnabled && (jointSettings.horizontal > 0 || jointSettings.vertical > 0)) {
-    ctx.save();
-    ctx.fillStyle = jointSettings.tint;
-    ctx.globalAlpha = 0.6; // Make joints more subtle
+    // Draw joints if enabled
+    if (jointSettings.horizontal > 0 || jointSettings.vertical > 0) {
+      ctx.save();
+      ctx.fillStyle = jointSettings.tint;
+      ctx.globalAlpha = 0.8;
 
-    // Draw horizontal joints
-    if (jointSettings.horizontal > 0) {
-      const jointHeight = (jointSettings.horizontal / patternSettings.height) * patternUnitHeight;
-      // Only draw if joint height is meaningful (at least 1 pixel)
-      if (jointHeight >= 1) {
+      if (jointSettings.horizontal > 0) {
+        const jointHeight = (jointSettings.horizontal / patternSettings.height) * patternUnitHeight;
         for (let row = 1; row < rows; row++) {
           const y = row * patternUnitHeight;
           ctx.fillRect(0, y - jointHeight / 2, outputWidth, jointHeight);
         }
+      }
+
+      if (jointSettings.vertical > 0) {
+        const jointWidth = (jointSettings.vertical / patternSettings.width) * patternUnitWidth;
+        for (let col = 1; col < columns; col++) {
+          const x = col * patternUnitWidth;
+          ctx.fillRect(x - jointWidth / 2, 0, jointWidth, outputHeight);
+        }
+      }
+
+      ctx.restore();
+    }
+
+    return textureCanvas;
+  }
+
+  // Material-based rendering
+  // Clear canvas with background color
+  ctx.fillStyle = '#f0f0f0';
+  ctx.fillRect(0, 0, outputWidth, outputHeight);
+
+  // Load material image
+  const materialImg = await loadImage(material.imageUrl);
+  
+  // Apply adjustments to material
+  const adjustedMaterial = await applyAdjustments(materialImg, adjustments);
+
+  // Step 1: Draw material as a SINGLE image covering the entire canvas
+  // Material size doesn't change with rows/columns - it's always full canvas
+  ctx.drawImage(adjustedMaterial, 0, 0, outputWidth, outputHeight);
+
+  // Step 2: Apply tint if needed
+  if (materialSettings.tint !== '#FFFFFF') {
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = materialSettings.tint;
+    ctx.fillRect(0, 0, outputWidth, outputHeight);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // Step 3: Draw pattern ON TOP of the material so it's visible
+  // The pattern defines the tile arrangement and should be visible over the material
+  if (patternImg && patternImg.complete && patternImg.naturalWidth > 0) {
+    ctx.save();
+    
+    // Draw pattern as overlay - use multiply blend mode to darken where pattern lines are
+    // This makes the pattern visible on top of the material
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.globalAlpha = 0.4; // Semi-transparent so material shows through but pattern is visible
+    
+    // Tile the pattern SVG on top of the material
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < columns; col++) {
+        const x = col * patternUnitWidth;
+        const y = row * patternUnitHeight;
+        
+        ctx.drawImage(
+          patternImg,
+          x,
+          y,
+          patternUnitWidth,
+          patternUnitHeight
+        );
+      }
+    }
+    
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1.0;
+    ctx.restore();
+  }
+
+  // Step 4: Draw joints if enabled
+  if (jointSettings.horizontal > 0 || jointSettings.vertical > 0) {
+    ctx.save();
+    ctx.fillStyle = jointSettings.tint;
+    ctx.globalAlpha = 0.8;
+
+    // Draw horizontal joints
+    if (jointSettings.horizontal > 0) {
+      const jointHeight = (jointSettings.horizontal / patternSettings.height) * patternUnitHeight;
+      for (let row = 1; row < rows; row++) {
+        const y = row * patternUnitHeight;
+        ctx.fillRect(0, y - jointHeight / 2, outputWidth, jointHeight);
       }
     }
 
     // Draw vertical joints
     if (jointSettings.vertical > 0) {
       const jointWidth = (jointSettings.vertical / patternSettings.width) * patternUnitWidth;
-      // Only draw if joint width is meaningful (at least 1 pixel)
-      if (jointWidth >= 1) {
-        for (let col = 1; col < columns; col++) {
-          const x = col * patternUnitWidth;
-          ctx.fillRect(x - jointWidth / 2, 0, jointWidth, outputHeight);
-        }
+      for (let col = 1; col < columns; col++) {
+        const x = col * patternUnitWidth;
+        ctx.fillRect(x - jointWidth / 2, 0, jointWidth, outputHeight);
       }
     }
 
@@ -212,7 +202,7 @@ export async function createTextureFromConfig(
   config: TextureConfig,
   outputWidth: number = 2048,
   outputHeight: number = 2048
-): Promise<THREE.Texture> {
+): Promise<{ map: THREE.Texture; displacementMap: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture }> {
   const canvas = await createTextureCanvas(config, outputWidth, outputHeight);
   
   // Convert canvas to Three.js texture
@@ -221,7 +211,257 @@ export async function createTextureFromConfig(
   texture.wrapT = THREE.RepeatWrapping;
   texture.needsUpdate = true;
 
+  // Create displacement map (depth information) - returns both texture and canvas
+  const { texture: displacementMap, canvas: displacementCanvas } = await createDisplacementMap(config, outputWidth, outputHeight);
+  
+  // Create normal map (surface detail) from displacement canvas
+  const normalMap = await createNormalMap(displacementCanvas, outputWidth, outputHeight);
+  
+  // Create roughness map (surface roughness)
+  const roughnessMap = await createRoughnessMap(config, outputWidth, outputHeight);
+
+  return { map: texture, displacementMap, normalMap, roughnessMap };
+}
+
+/**
+ * Creates a displacement map where joints are deep (dark) and tiles are raised (light)
+ */
+async function createDisplacementMap(
+  config: TextureConfig,
+  outputWidth: number,
+  outputHeight: number
+): Promise<{ texture: THREE.Texture; canvas: HTMLCanvasElement }> {
+  const { pattern, patternSettings, jointSettings } = config;
+  
+  const canvas = document.createElement('canvas');
+  canvas.width = outputWidth;
+  canvas.height = outputHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Failed to get canvas context');
+
+  // Start with white (raised tiles)
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, outputWidth, outputHeight);
+
+  const rows = patternSettings.rows;
+  const columns = patternSettings.columns;
+  const patternUnitWidth = outputWidth / columns;
+  const patternUnitHeight = outputHeight / rows;
+
+  // Load pattern SVG if exists
+  let patternImg: HTMLImageElement | null = null;
+  if (pattern?.svgUrl) {
+    try {
+      patternImg = await loadPatternSVG(pattern.svgUrl);
+    } catch (error) {
+      console.warn('Failed to load pattern SVG for displacement:', error);
+    }
+  }
+
+  // Draw joints as dark areas (deep/recessed)
+  ctx.fillStyle = '#000000'; // Black = deep
+  ctx.globalAlpha = 1.0;
+
+  // Horizontal joints (recessed)
+  if (jointSettings.horizontal > 0) {
+    const jointHeight = (jointSettings.horizontal / patternSettings.height) * patternUnitHeight;
+    for (let row = 1; row < rows; row++) {
+      const y = row * patternUnitHeight;
+      ctx.fillRect(0, y - jointHeight / 2, outputWidth, jointHeight);
+    }
+  }
+
+  // Vertical joints (recessed)
+  if (jointSettings.vertical > 0) {
+    const jointWidth = (jointSettings.vertical / patternSettings.width) * patternUnitWidth;
+    for (let col = 1; col < columns; col++) {
+      const x = col * patternUnitWidth;
+      ctx.fillRect(x - jointWidth / 2, 0, jointWidth, outputHeight);
+    }
+  }
+
+  // Add pattern-based depth variation
+  if (patternImg && patternImg.complete && patternImg.naturalWidth > 0) {
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.globalAlpha = 0.3; // Subtle depth variation
+    
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < columns; col++) {
+        const x = col * patternUnitWidth;
+        const y = row * patternUnitHeight;
+        
+        ctx.drawImage(
+          patternImg,
+          x,
+          y,
+          patternUnitWidth,
+          patternUnitHeight
+        );
+      }
+    }
+    
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1.0;
+  }
+
+  // Add noise for roughness
+  addNoiseToDisplacement(ctx, outputWidth, outputHeight, 0.05);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.needsUpdate = true;
+
+  return { texture, canvas };
+}
+
+/**
+ * Creates a normal map from the displacement map for surface detail
+ */
+async function createNormalMap(
+  displacementCanvas: HTMLCanvasElement,
+  outputWidth: number,
+  outputHeight: number
+): Promise<THREE.Texture> {
+  const ctx = displacementCanvas.getContext('2d');
+  if (!ctx) throw new Error('Failed to get displacement context');
+  
+  const imageData = ctx.getImageData(0, 0, outputWidth, outputHeight);
+  const data = imageData.data;
+  
+  const normalCanvas = document.createElement('canvas');
+  normalCanvas.width = outputWidth;
+  normalCanvas.height = outputHeight;
+  const normalCtx = normalCanvas.getContext('2d');
+  if (!normalCtx) throw new Error('Failed to get normal canvas context');
+  
+  const normalData = normalCtx.createImageData(outputWidth, outputHeight);
+  const normal = normalData.data;
+  
+  // Calculate normals from displacement gradients
+  for (let y = 0; y < outputHeight; y++) {
+    for (let x = 0; x < outputWidth; x++) {
+      const idx = (y * outputWidth + x) * 4;
+      
+      // Sample neighboring pixels for gradient
+      const getHeight = (px: number, py: number) => {
+        const clampedX = Math.max(0, Math.min(outputWidth - 1, px));
+        const clampedY = Math.max(0, Math.min(outputHeight - 1, py));
+        const i = (clampedY * outputWidth + clampedX) * 4;
+        return data[i] / 255; // Normalize to 0-1
+      };
+      
+      const height = getHeight(x, y);
+      const heightL = getHeight(x - 1, y);
+      const heightR = getHeight(x + 1, y);
+      const heightU = getHeight(x, y - 1);
+      const heightD = getHeight(x, y + 1);
+      
+      // Calculate normal from gradients
+      const dx = (heightR - heightL) * 0.5;
+      const dy = (heightD - heightU) * 0.5;
+      const dz = 1.0;
+      
+      const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const nx = (dx / length) * 0.5 + 0.5; // Convert -1..1 to 0..1
+      const ny = (dy / length) * 0.5 + 0.5;
+      const nz = (dz / length) * 0.5 + 0.5;
+      
+      // Normal map: R = X, G = Y, B = Z
+      normal[idx] = nx * 255;     // R
+      normal[idx + 1] = ny * 255;  // G
+      normal[idx + 2] = nz * 255; // B
+      normal[idx + 3] = 255;       // A
+    }
+  }
+  
+  normalCtx.putImageData(normalData, 0, 0);
+  
+  const texture = new THREE.CanvasTexture(normalCanvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.needsUpdate = true;
+
   return texture;
+}
+
+/**
+ * Creates a roughness map for realistic surface variation
+ */
+async function createRoughnessMap(
+  config: TextureConfig,
+  outputWidth: number,
+  outputHeight: number
+): Promise<THREE.Texture> {
+  const { patternSettings, jointSettings } = config;
+  
+  const canvas = document.createElement('canvas');
+  canvas.width = outputWidth;
+  canvas.height = outputHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Failed to get canvas context');
+
+  // Base roughness (medium)
+  ctx.fillStyle = '#808080'; // 50% roughness
+  ctx.fillRect(0, 0, outputWidth, outputHeight);
+
+  const rows = patternSettings.rows;
+  const columns = patternSettings.columns;
+  const patternUnitWidth = outputWidth / columns;
+  const patternUnitHeight = outputHeight / rows;
+
+  // Joints are rougher (lighter = more rough in some systems, darker = more rough in others)
+  // We'll make joints darker (more rough)
+  ctx.fillStyle = '#404040'; // More rough
+  ctx.globalAlpha = 0.8;
+
+  if (jointSettings.horizontal > 0) {
+    const jointHeight = (jointSettings.horizontal / patternSettings.height) * patternUnitHeight;
+    for (let row = 1; row < rows; row++) {
+      const y = row * patternUnitHeight;
+      ctx.fillRect(0, y - jointHeight / 2, outputWidth, jointHeight);
+    }
+  }
+
+  if (jointSettings.vertical > 0) {
+    const jointWidth = (jointSettings.vertical / patternSettings.width) * patternUnitWidth;
+    for (let col = 1; col < columns; col++) {
+      const x = col * patternUnitWidth;
+      ctx.fillRect(x - jointWidth / 2, 0, jointWidth, outputHeight);
+    }
+  }
+
+  // Add noise for surface variation
+  addNoiseToDisplacement(ctx, outputWidth, outputHeight, 0.1);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.needsUpdate = true;
+
+  return texture;
+}
+
+/**
+ * Adds noise to displacement map for roughness
+ */
+function addNoiseToDisplacement(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  intensity: number
+) {
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const noise = (Math.random() - 0.5) * intensity * 255;
+    data[i] = Math.max(0, Math.min(255, data[i] + noise));     // R
+    data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + noise)); // G
+    data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + noise)); // B
+  }
+
+  ctx.putImageData(imageData, 0, 0);
 }
 
 async function loadImage(url: string): Promise<HTMLImageElement> {
@@ -250,99 +490,74 @@ async function loadImage(url: string): Promise<HTMLImageElement> {
 }
 
 async function loadPatternSVG(url: string): Promise<HTMLImageElement> {
-  try {
-    // Fetch SVG as text so we can modify it
-    const response = await fetch(url, { mode: 'cors' });
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    
-    let svgText = await response.text();
-    
-    // Modify SVG to fill the paths instead of just stroking them
-    // Architextures SVGs have fill:none and stroke:#000, we need to fill the shapes
-    // The pattern SVG defines tile shapes - we want these shapes filled with black
-    
-    // Replace fill:none with fill:#000000 (black fill)
-    svgText = svgText.replace(/fill:\s*none/gi, 'fill:#000000');
-    svgText = svgText.replace(/fill="none"/gi, 'fill="#000000"');
-    svgText = svgText.replace(/fill='none'/gi, "fill='#000000'");
-    
-    // Convert strokes to fills by removing stroke and ensuring fill is set
-    // If element has stroke but no fill, add fill with the stroke color
-    svgText = svgText.replace(/stroke="([^"]*)"/gi, (match, strokeColor) => {
-      // Keep stroke for now, but we'll ensure fill is set
-      return match;
-    });
-    
-    // Ensure all path elements have fill (prefer existing fill, otherwise add black fill)
-    svgText = svgText.replace(/<path([^>]*?)>/gi, (match, attrs) => {
-      // If path doesn't have fill attribute, add it
-      if (!attrs.includes('fill=') && !attrs.includes('fill:')) {
-        return `<path${attrs} fill="#000000">`;
-      }
-      // If path has fill="none", replace it
-      if (attrs.includes('fill="none"') || attrs.includes("fill='none'")) {
-        return `<path${attrs.replace(/fill=["']none["']/gi, 'fill="#000000"')}>`;
-      }
-      return match;
-    });
-    
-    // Also handle other shape elements (rect, circle, etc.)
-    svgText = svgText.replace(/<(rect|circle|ellipse|polygon|polyline)([^>]*?)>/gi, (match, tag, attrs) => {
-      if (!attrs.includes('fill=') && !attrs.includes('fill:')) {
-        return `<${tag}${attrs} fill="#000000">`;
-      }
-      if (attrs.includes('fill="none"') || attrs.includes("fill='none'")) {
-        return `<${tag}${attrs.replace(/fill=["']none["']/gi, 'fill="#000000"')}>`;
-      }
-      return match;
-    });
-    
-    // Create blob URL from modified SVG
-    const svgBlob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
-    const blobUrl = URL.createObjectURL(svgBlob);
-    
-    // Load as image
-    const img = await loadImage(blobUrl);
-    
-    // Clean up blob URL
-    URL.revokeObjectURL(blobUrl);
-    
-    return img;
-  } catch (error) {
-    console.warn('Failed to fetch and modify SVG, trying direct load:', error);
-    // Fallback to direct image load
+  // If URL is from our API route, fetch as text and convert to blob URL
+  // This bypasses CORS issues
+  if (url.startsWith('/api/pattern')) {
     try {
-      return await loadImage(url);
-    } catch (directError) {
-      console.warn('Direct load also failed, using fallback pattern:', directError);
-      // If both fail, use a simple fallback pattern
-      return await createFallbackPatternSVG();
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch pattern: ${response.status}`);
+      }
+      const svgText = await response.text();
+      
+      // Create blob URL from SVG text
+      const svgBlob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+      const blobUrl = URL.createObjectURL(svgBlob);
+      
+      // Load as image
+      const img = await loadImage(blobUrl);
+      
+      // Clean up blob URL
+      URL.revokeObjectURL(blobUrl);
+      
+      return img;
+    } catch (error) {
+      console.warn('Failed to load pattern via API, creating fallback:', error);
+      return createFallbackPattern();
     }
   }
+  
+  // For external URLs, try direct load
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    
+    const timeout = setTimeout(() => {
+      reject(new Error('Pattern SVG load timeout'));
+    }, 10000);
+    
+    img.onload = () => {
+      clearTimeout(timeout);
+      if (img.complete && img.naturalWidth > 0) {
+        resolve(img);
+      } else {
+        reject(new Error('Pattern SVG loaded but appears broken'));
+      }
+    };
+    
+    img.onerror = () => {
+      clearTimeout(timeout);
+      console.warn('Pattern SVG failed to load, creating fallback');
+      resolve(createFallbackPattern());
+    };
+    
+    img.src = url;
+  });
 }
 
-// Function to create a fallback square pattern SVG
-async function createFallbackPatternSVG(): Promise<HTMLImageElement> {
-  const svgText = `<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-    <rect x="0" y="0" width="100" height="100" fill="white"/>
-  </svg>`;
-  const svgBlob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
-  const svgObjectUrl = URL.createObjectURL(svgBlob);
+function createFallbackPattern(): HTMLImageElement {
+  // Create a simple square pattern as fallback
+  const canvas = document.createElement('canvas');
+  canvas.width = 100;
+  canvas.height = 100;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, 100, 100);
+  }
+  
   const img = new Image();
-  await new Promise<void>((resolve) => {
-    img.onload = () => {
-      URL.revokeObjectURL(svgObjectUrl);
-      resolve();
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(svgObjectUrl);
-      console.error('Failed to create fallback SVG image.');
-      resolve();
-    };
-    img.src = svgObjectUrl;
-  });
+  img.src = canvas.toDataURL();
   return img;
 }
 
@@ -463,4 +678,3 @@ function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
     Math.round((b + m) * 255)
   ];
 }
-

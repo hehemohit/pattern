@@ -9,10 +9,6 @@ const nextConfig: NextConfig = {
       },
       {
         protocol: 'https',
-        hostname: 'cdn.architextures.org',
-      },
-      {
-        protocol: 'https',
         hostname: 'assets.architextures.org',
       },
     ],
