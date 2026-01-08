@@ -186,7 +186,7 @@ export default function Home() {
                 <Texture3DViewer config={config} className="w-full h-full" />
               </div>
             </div>
-          </div>
+        </div>
         </div>
       </div>
 

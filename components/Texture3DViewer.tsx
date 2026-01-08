@@ -65,7 +65,7 @@ export default function Texture3DViewer({ config, className }: Texture3DViewerPr
     const material = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       side: THREE.DoubleSide,
-      displacementScale: 0.1, // Depth of displacement
+      displacementScale: 0.15, // Depth of displacement (increased for pattern visibility)
       displacementBias: 0,
     });
     const mesh = new THREE.Mesh(geometry, material);
@@ -144,7 +144,7 @@ export default function Texture3DViewer({ config, className }: Texture3DViewerPr
         material.displacementMap = textures.displacementMap;
         material.normalMap = textures.normalMap;
         material.roughnessMap = textures.roughnessMap;
-        material.displacementScale = 0.1; // Adjust depth
+        material.displacementScale = 0.15; // Increased depth for pattern visibility
         material.needsUpdate = true;
       })
       .catch((error) => {

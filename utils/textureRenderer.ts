@@ -239,7 +239,8 @@ async function createDisplacementMap(
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Failed to get canvas context');
 
-  // Start with white (raised tiles)
+  // Start with white (raised surface - no depth)
+  // Pattern lines will create the depth, not the grid
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, outputWidth, outputHeight);
 
@@ -248,7 +249,7 @@ async function createDisplacementMap(
   const patternUnitWidth = outputWidth / columns;
   const patternUnitHeight = outputHeight / rows;
 
-  // Load pattern SVG if exists
+  // Load pattern SVG - the pattern LINES themselves will create depth
   let patternImg: HTMLImageElement | null = null;
   if (pattern?.svgUrl) {
     try {
@@ -258,50 +259,80 @@ async function createDisplacementMap(
     }
   }
 
-  // Draw joints as dark areas (deep/recessed)
-  ctx.fillStyle = '#000000'; // Black = deep
-  ctx.globalAlpha = 1.0;
+  // DO NOT add grid-based joint depth - only pattern lines create depth
 
-  // Horizontal joints (recessed)
-  if (jointSettings.horizontal > 0) {
-    const jointHeight = (jointSettings.horizontal / patternSettings.height) * patternUnitHeight;
-    for (let row = 1; row < rows; row++) {
-      const y = row * patternUnitHeight;
-      ctx.fillRect(0, y - jointHeight / 2, outputWidth, jointHeight);
-    }
-  }
-
-  // Vertical joints (recessed)
-  if (jointSettings.vertical > 0) {
-    const jointWidth = (jointSettings.vertical / patternSettings.width) * patternUnitWidth;
-    for (let col = 1; col < columns; col++) {
-      const x = col * patternUnitWidth;
-      ctx.fillRect(x - jointWidth / 2, 0, jointWidth, outputHeight);
-    }
-  }
-
-  // Add pattern-based depth variation
-  if (patternImg && patternImg.complete && patternImg.naturalWidth > 0) {
-    ctx.globalCompositeOperation = 'multiply';
-    ctx.globalAlpha = 0.3; // Subtle depth variation
-    
+  // PATTERN LINES create depth - the actual drawn lines in the pattern SVG
+  // Where pattern lines are drawn = recessed areas (depth)
+  if (patternImg && patternImg.complete && patternImg.naturalWidth > 0 && patternImg.naturalHeight > 0) {
+    // Tile the pattern across the displacement map
+    // Pattern lines themselves will create the depth effect
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < columns; col++) {
         const x = col * patternUnitWidth;
         const y = row * patternUnitHeight;
         
-        ctx.drawImage(
-          patternImg,
-          x,
-          y,
-          patternUnitWidth,
-          patternUnitHeight
-        );
+        // Create a tile-sized canvas for this pattern instance
+        const tileCanvas = document.createElement('canvas');
+        tileCanvas.width = patternUnitWidth;
+        tileCanvas.height = patternUnitHeight;
+        const tileCtx = tileCanvas.getContext('2d', { willReadFrequently: true });
+        
+        if (tileCtx) {
+          // Start with white background (raised surface, no depth)
+          tileCtx.fillStyle = '#ffffff';
+          tileCtx.fillRect(0, 0, patternUnitWidth, patternUnitHeight);
+          
+          // Draw the pattern - the lines/shapes in the pattern will create depth
+          tileCtx.drawImage(patternImg, 0, 0, patternUnitWidth, patternUnitHeight);
+          const tileData = tileCtx.getImageData(0, 0, patternUnitWidth, patternUnitHeight);
+          const tilePixels = tileData.data;
+          
+          // Get the displacement data for this tile area
+          const displacementData = ctx.getImageData(x, y, patternUnitWidth, patternUnitHeight);
+          const dispPixels = displacementData.data;
+          
+          // Convert pattern lines to depth
+          // Simple approach: any non-white pixel in the pattern = depth
+          for (let i = 0; i < tilePixels.length; i += 4) {
+            const r = tilePixels[i];
+            const g = tilePixels[i + 1];
+            const b = tilePixels[i + 2];
+            const alpha = tilePixels[i + 3];
+            
+            // Check if this pixel is NOT white (i.e., it's part of the pattern)
+            // White = RGB all > 240, or very low alpha
+            const isWhite = (r > 240 && g > 240 && b > 240) || alpha < 10;
+            
+            if (!isWhite) {
+              // This is a pattern line/pixel - create depth
+              // Calculate how dark it is (0 = black, 1 = white)
+              const luminance = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
+              const darkness = 1 - luminance;
+              
+              // Use alpha to weight the depth
+              const alphaWeight = alpha / 255;
+              
+              // Combine darkness and alpha for depth intensity
+              const depthIntensity = darkness * alphaWeight;
+              
+              // Convert to displacement: darker pattern = deeper recess
+              // White (255) = raised, Black (0) = deeply recessed
+              const recessedDepth = 255 * (1 - depthIntensity * 0.75);
+              
+              // Set displacement
+              const finalDepth = Math.max(0, Math.min(255, recessedDepth));
+              dispPixels[i] = finalDepth;     // R
+              dispPixels[i + 1] = finalDepth;  // G
+              dispPixels[i + 2] = finalDepth; // B
+            }
+            // White pixels stay white (raised, no depth)
+          }
+          
+          // Apply the depth data back to the displacement map
+          ctx.putImageData(displacementData, x, y);
+        }
       }
     }
-    
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1.0;
   }
 
   // Add noise for roughness
@@ -393,7 +424,7 @@ async function createRoughnessMap(
   outputWidth: number,
   outputHeight: number
 ): Promise<THREE.Texture> {
-  const { patternSettings, jointSettings } = config;
+  const { pattern, patternSettings, jointSettings } = config;
   
   const canvas = document.createElement('canvas');
   canvas.width = outputWidth;
@@ -428,6 +459,65 @@ async function createRoughnessMap(
     for (let col = 1; col < columns; col++) {
       const x = col * patternUnitWidth;
       ctx.fillRect(x - jointWidth / 2, 0, jointWidth, outputHeight);
+    }
+  }
+
+  // Add pattern-based roughness variation using alpha channel
+  // Pattern areas should be rougher (darker in roughness map)
+  if (pattern?.svgUrl) {
+    let patternImg: HTMLImageElement | null = null;
+    try {
+      patternImg = await loadPatternSVG(pattern.svgUrl);
+    } catch (error) {
+      console.warn('Failed to load pattern SVG for roughness:', error);
+    }
+
+    if (patternImg && patternImg.complete && patternImg.naturalWidth > 0) {
+      // Tile the pattern and apply roughness based on alpha
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < columns; col++) {
+          const x = col * patternUnitWidth;
+          const y = row * patternUnitHeight;
+          
+          const tileCanvas = document.createElement('canvas');
+          tileCanvas.width = patternUnitWidth;
+          tileCanvas.height = patternUnitHeight;
+          const tileCtx = tileCanvas.getContext('2d', { willReadFrequently: true });
+          
+          if (tileCtx) {
+            tileCtx.fillStyle = '#808080'; // Base roughness
+            tileCtx.fillRect(0, 0, patternUnitWidth, patternUnitHeight);
+            tileCtx.drawImage(patternImg, 0, 0, patternUnitWidth, patternUnitHeight);
+            const tileData = tileCtx.getImageData(0, 0, patternUnitWidth, patternUnitHeight);
+            const tilePixels = tileData.data;
+            
+            const roughnessData = ctx.getImageData(x, y, patternUnitWidth, patternUnitHeight);
+            const roughPixels = roughnessData.data;
+            
+            // Apply pattern alpha to roughness - pattern areas are rougher
+            for (let i = 0; i < tilePixels.length; i += 4) {
+              const alpha = tilePixels[i + 3] / 255;
+              const luminance = (tilePixels[i] * 0.299 + tilePixels[i + 1] * 0.587 + tilePixels[i + 2] * 0.114) / 255;
+              const patternIntensity = 1 - luminance;
+              const roughnessFactor = alpha * patternIntensity;
+              
+              if (roughnessFactor > 0.01) {
+                // Pattern areas are rougher (darker in roughness map)
+                const currentRoughness = roughPixels[i];
+                const targetRoughness = 255 * (0.3 + roughnessFactor * 0.4); // 30-70% roughness range
+                const blended = currentRoughness * (1 - roughnessFactor * 0.5) + targetRoughness * (roughnessFactor * 0.5);
+                
+                const finalValue = Math.max(0, Math.min(255, blended));
+                roughPixels[i] = finalValue;
+                roughPixels[i + 1] = finalValue;
+                roughPixels[i + 2] = finalValue;
+              }
+            }
+            
+            ctx.putImageData(roughnessData, x, y);
+          }
+        }
+      }
     }
   }
 
